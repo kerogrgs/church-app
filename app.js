@@ -1110,6 +1110,7 @@ const Notifications = {
     if (Notification.permission === "granted") {
       Notifications.permission = "granted";
       Notifications.checkAbsentees();
+      Notifications.checkUpcomingBirthdays();
     } else if (Notification.permission === "default" && stored !== "dismissed") {
       // Show polite in-app banner
       const banner = document.getElementById("notif-banner");
@@ -1126,6 +1127,7 @@ const Notifications = {
 
       if (result === "granted") {
         Notifications.checkAbsentees();
+        Notifications.checkUpcomingBirthdays();
       }
     } catch (e) {
       console.warn("Notification permission error:", e);
@@ -1166,6 +1168,90 @@ const Notifications = {
       tag: tag || "sunday-app",
       dir: "rtl",
       lang: "ar"
+    });
+  },
+
+  /**
+   * Birthday countdown notifications (local/client-triggered only).
+   *
+   * Shows a daily notification for any member whose birthday falls within the
+   * next 7 days (0 = today, 7 = one week away).  Fires one notification per
+   * matching member so servants can act on each name individually.  Visible to
+   * whichever servant has this family's members loaded in the current session;
+   * no server-side push is involved — the app must be opened for this to run.
+   */
+  checkUpcomingBirthdays() {
+    if (Notifications.permission !== "granted") return;
+
+    const members = Storage.getMembers();
+    const today = new Date();
+    const todayMonth = today.getMonth() + 1; // 1-indexed
+    const todayDay   = today.getDate();
+    const todayYear  = today.getFullYear();
+
+    members.forEach((member) => {
+      try {
+        const dob = member.dob;
+        if (!dob || typeof dob !== "string" || !dob.trim()) return;
+
+        // Parse YYYY-MM-DD (same convention as calculateAge)
+        const parts = dob.trim().split("-");
+        if (parts.length < 3) return;
+        const bMonth = parseInt(parts[1], 10);
+        const bDay   = parseInt(parts[2], 10);
+        if (!bMonth || !bDay || isNaN(bMonth) || isNaN(bDay)) return;
+
+        // Handle Feb 29 in non-leap years: treat as Feb 28
+        let effectiveDay = bDay;
+        if (bMonth === 2 && bDay === 29) {
+          const isLeap = (todayYear % 4 === 0 && (todayYear % 100 !== 0 || todayYear % 400 === 0));
+          if (!isLeap) effectiveDay = 28;
+        }
+
+        // Build this year's birthday date (time-zeroed)
+        let birthday = new Date(todayYear, bMonth - 1, effectiveDay, 0, 0, 0, 0);
+
+        // If the birthday has already passed this calendar year, look to next year
+        const todayMidnight = new Date(todayYear, today.getMonth(), todayDay, 0, 0, 0, 0);
+        if (birthday < todayMidnight) {
+          birthday = new Date(todayYear + 1, bMonth - 1, effectiveDay, 0, 0, 0, 0);
+        }
+
+        const msPerDay = 24 * 60 * 60 * 1000;
+        const daysRemaining = Math.round((birthday - todayMidnight) / msPerDay);
+
+        if (daysRemaining < 0 || daysRemaining > 7) return;
+
+        const name = member.name || "أحد المخدومين";
+        let title, body;
+
+        if (daysRemaining === 0) {
+          title = "عيد ميلاد سعيد 🎉";
+          body  = `النهاردة عيد ميلاد ${name}`;
+        } else {
+          title = "تذكير بعيد ميلاد 🎂";
+          // Arabic singular / dual / plural for "day/days"
+          let daysWord;
+          if (daysRemaining === 1) {
+            daysWord = "يوم";
+          } else if (daysRemaining === 2) {
+            daysWord = "يومين";
+          } else if (daysRemaining <= 10) {
+            daysWord = `${daysRemaining} أيام`;
+          } else {
+            daysWord = `${daysRemaining} يوم`;
+          }
+          body = `${name} — باقي ${daysWord} على عيد ميلاده`;
+        }
+
+        // Unique tag per member+day prevents duplicate suppression across members
+        const tag = `birthday-${member.id}-${daysRemaining}`;
+        Notifications.fireNotification(title, body, tag);
+
+      } catch (e) {
+        // Silently skip members with invalid dob data
+        console.warn("Birthday check skipped for member:", member.id, e);
+      }
     });
   }
 };
