@@ -495,6 +495,10 @@ const API = {
       };
     }
 
+    if (action === "refreshMembers") {
+      return { success: true, members: Storage.getMembers() };
+    }
+
     if (action === "updateFamilyConfig") {
       return { success: true };
     }
@@ -626,6 +630,18 @@ const API = {
 
   async updateFamilyConfig(families, passwords) {
     return API.post({ action: "updateFamilyConfig", families, passwords });
+  },
+
+  async deleteFamilyData(family) {
+    return API.post({ action: "deleteFamilyData", family });
+  },
+
+  async renameFamily(oldName, newName) {
+    return API.post({ action: "renameFamily", oldName, newName });
+  },
+
+  async refreshMembers(family) {
+    return API.post({ action: "refreshMembers", family });
   },
 
   async getFamilies() {
@@ -3056,6 +3072,34 @@ const App = {
       UI.updateQueueCountBadges();
     });
 
+    // Settings: refresh members from server
+    document.getElementById("settings-refresh-members").addEventListener("click", async () => {
+      if (!navigator.onLine) {
+        showToast("أنت غير متصل بالإنترنت", "error");
+        return;
+      }
+      const family = Storage.getFamily();
+      if (!family) {
+        showToast("لم يتم تحديد الأسرة", "error");
+        return;
+      }
+      setLoading(true, "جاري تحديث بيانات المخدومين...");
+      try {
+        const result = await API.refreshMembers(family);
+        if (result && result.success && result.members) {
+          Storage.setMembers(result.members);
+          UI.renderMembersList();
+          showToast("✅ تم تحديث بيانات المخدومين", "success");
+        } else {
+          showToast("فشل تحديث البيانات، حاول مرة أخرى", "error");
+        }
+      } catch (e) {
+        showToast("فشل تحديث البيانات، حاول مرة أخرى", "error");
+      } finally {
+        setLoading(false);
+      }
+    });
+
     // Settings notification
     document.getElementById("settings-notif").addEventListener("click", () => {
       if (Notification.permission === "default") {
@@ -3860,22 +3904,31 @@ const App = {
       btn.disabled = true;
       btn.classList.add("btn-loading");
 
-      // Update local families list
-      const idx = App.adminFamilies.indexOf(originalName);
-      if (idx !== -1) App.adminFamilies[idx] = newName;
-
-      if (newPassword) {
-        App.adminPasswords[newName] = newPassword;
-        delete App.adminPasswords[originalName];
-      } else {
-        // Preserve old password mapping under new name
-        if (App.adminPasswords[originalName]) {
-          App.adminPasswords[newName] = App.adminPasswords[originalName];
-          delete App.adminPasswords[originalName];
-        }
-      }
-
       try {
+        // If the name changed, rename all associated sheet tabs first
+        if (originalName !== newName) {
+          const renameResult = await API.renameFamily(originalName, newName);
+          if (!renameResult || !renameResult.success) {
+            showToast(renameResult && renameResult.error ? renameResult.error : "فشل في إعادة تسمية الجداول", "error");
+            return;
+          }
+        }
+
+        // Update local families list
+        const idx = App.adminFamilies.indexOf(originalName);
+        if (idx !== -1) App.adminFamilies[idx] = newName;
+
+        if (newPassword) {
+          App.adminPasswords[newName] = newPassword;
+          delete App.adminPasswords[originalName];
+        } else {
+          // Preserve old password mapping under new name
+          if (App.adminPasswords[originalName]) {
+            App.adminPasswords[newName] = App.adminPasswords[originalName];
+            delete App.adminPasswords[originalName];
+          }
+        }
+
         const result = await API.updateFamilyConfig(App.adminFamilies, App.adminPasswords);
         if (result.success) {
           CONFIG.FAMILIES = [...App.adminFamilies];
@@ -3895,20 +3948,90 @@ const App = {
     },
 
     async deleteFamily(familyName) {
-      if (!confirm(`هل أنت متأكد من حذف "${familyName}"؟ لا يمكن التراجع عن هذا الإجراء.`)) return;
+      // — Typed-confirmation modal —
+      const confirmed = await new Promise((resolve) => {
+        const overlay = document.createElement("div");
+        overlay.className = "modal-overlay";
+        overlay.innerHTML = `
+          <div class="modal modal-center">
+            <div class="modal-title" style="color:var(--danger);">⚠️ حذف دائم لجميع البيانات</div>
+            <div class="modal-subtitle">
+              هذا الإجراء لا يمكن التراجع عنه. سيتم حذف جميع جداول<br>
+              <strong>«${familyName}»</strong> نهائياً: قائمة المخدومين، سجلات الحضور،
+              الخدام، والافتقاد.
+            </div>
+            <div style="margin-bottom:16px;font-size:15px;font-weight:700;color:var(--text-primary);">
+              اكتب اسم الأسرة (<span style="unicode-bidi:plain;font-family:monospace;">${familyName}</span>) للتأكيد
+            </div>
+            <input type="text" id="confirm-delete-input"
+                   placeholder="اكتب اسم الأسرة هنا..."
+                   style="width:100%;padding:14px;border:2px solid var(--border);border-radius:var(--radius-sm);font-size:18px;margin-bottom:20px;box-sizing:border-box;text-align:center;font-weight:600;">
+            <div style="display:flex;gap:12px;">
+              <button class="btn btn-ghost" id="confirm-delete-cancel" style="flex:1;">إلغاء</button>
+              <button class="btn btn-danger" id="confirm-delete-confirm" style="flex:1;">تأكيد الحذف</button>
+            </div>
+          </div>`;
+        document.body.appendChild(overlay);
+        requestAnimationFrame(() => overlay.classList.add("open"));
+        document.body.style.overflow = "hidden";
 
+        const input = overlay.querySelector("#confirm-delete-input");
+        const confirmBtn = overlay.querySelector("#confirm-delete-confirm");
+        const cancelBtn = overlay.querySelector("#confirm-delete-cancel");
+
+        function close() {
+          overlay.classList.remove("open");
+          document.body.style.overflow = "";
+          setTimeout(() => overlay.remove(), 300);
+        }
+
+        const reject = () => { resolve(false); close(); };
+        cancelBtn.onclick = reject;
+        overlay.onclick = (e) => { if (e.target === overlay) reject(); };
+        input.onkeydown = (e) => { if (e.key === "Enter") confirmBtn.click(); };
+        setTimeout(() => input.focus(), 100);
+
+        confirmBtn.onclick = () => {
+          if (input.value.trim() === familyName) {
+            resolve(true);
+            close();
+          } else {
+            showToast("الاسم غير مطابق، لم يتم الحذف", "error");
+            input.value = "";
+            input.focus();
+          }
+        };
+      });
+
+      if (!confirmed) return;
+
+      // — Proceed with deletion —
       App.adminFamilies = App.adminFamilies.filter((f) => f !== familyName);
       delete App.adminPasswords[familyName];
 
       try {
-        const result = await API.updateFamilyConfig(App.adminFamilies, App.adminPasswords);
-        if (result.success) {
-          CONFIG.FAMILIES = [...App.adminFamilies];
-          UI.renderFamiliesGrid();
-          UI.renderAdminFamilyList(App.adminFamilies);
-          showToast("✅ تم حذف الأسرة", "success");
-        } else {
+        const configResult = await API.updateFamilyConfig(App.adminFamilies, App.adminPasswords);
+        if (!configResult.success) {
           showToast("فشل في الحذف", "error");
+          return;
+        }
+
+        const deleteResult = await API.deleteFamilyData({ family: familyName });
+
+        CONFIG.FAMILIES = [...App.adminFamilies];
+        UI.renderFamiliesGrid();
+        UI.renderAdminFamilyList(App.adminFamilies);
+
+        if (deleteResult && deleteResult.success) {
+          const failed = deleteResult.failedSheets;
+          if (failed && failed.length > 0) {
+            showToast(`⚠️ تم حذف كل البيانات بنجاح ما عدا: ${failed.join("، ")} - يرجى حذفها يدويًا من الشيت`, "error", 8000);
+          } else {
+            const count = (deleteResult.deletedSheets && deleteResult.deletedSheets.length) || 0;
+            showToast(`✅ تم حذف الأسرة وجميع بياناتها (${count} جدول)`, "success");
+          }
+        } else {
+          showToast("⚠️ تم إزالة كلمة المرور لكن لم تُحذف جميع الجداول. حاول مرة أخرى أو راجع البيانات يدويًا.", "error");
         }
       } catch (e) {
         showToast("خطأ في الاتصال", "error");
