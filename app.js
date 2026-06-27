@@ -64,6 +64,62 @@ function toArabicNumerals(n) {
 }
 
 /**
+ * Calculate days remaining until the next birthday (0-7).
+ * Mirrors the exact day-diff logic from Notifications.checkUpcomingBirthdays().
+ * Returns null if DOB is invalid/missing or if the birthday is >7 days away.
+ * @param {string} dob YYYY-MM-DD
+ * @returns {number|null}
+ */
+function getDaysUntilBirthday(dob) {
+  if (!dob || typeof dob !== "string" || !dob.trim()) return null;
+  const parts = dob.trim().split("-");
+  if (parts.length < 3) return null;
+  const bMonth = parseInt(parts[1], 10);
+  const bDay   = parseInt(parts[2], 10);
+  if (!bMonth || !bDay || isNaN(bMonth) || isNaN(bDay)) return null;
+
+  const today = new Date();
+  const todayYear = today.getFullYear();
+
+  // Handle Feb 29 in non-leap years: treat as Feb 28
+  let effectiveDay = bDay;
+  if (bMonth === 2 && bDay === 29) {
+    const isLeap = (todayYear % 4 === 0 && (todayYear % 100 !== 0 || todayYear % 400 === 0));
+    if (!isLeap) effectiveDay = 28;
+  }
+
+  // Build this year's birthday date (time-zeroed)
+  let birthday = new Date(todayYear, bMonth - 1, effectiveDay, 0, 0, 0, 0);
+
+  // If the birthday has already passed this calendar year, look to next year
+  const todayMidnight = new Date(todayYear, today.getMonth(), today.getDate(), 0, 0, 0, 0);
+  if (birthday < todayMidnight) {
+    birthday = new Date(todayYear + 1, bMonth - 1, effectiveDay, 0, 0, 0, 0);
+  }
+
+  const msPerDay = 24 * 60 * 60 * 1000;
+  const daysRemaining = Math.round((birthday - todayMidnight) / msPerDay);
+
+  if (daysRemaining < 0 || daysRemaining > 7) return null;
+  return daysRemaining;
+}
+
+/**
+ * Format a number of days as an Arabic day word (singular/dual/plural).
+ * Mirrors the exact convention from Notifications.checkUpcomingBirthdays().
+ * Uses Arabic-Indic numerals for the card display.
+ * @param {number} days
+ * @returns {string}
+ */
+function formatDaysWord(days) {
+  const n = toArabicNumerals(days);
+  if (days === 1) return "يوم";
+  if (days === 2) return "يومين";
+  if (days <= 10) return `${n} أيام`;
+  return `${n} يوم`;
+}
+
+/**
  * Generate a UUID v4.
  * @returns {string}
  */
@@ -1702,6 +1758,15 @@ const UI = {
 
       const age = calculateAge(member.dob);
       const ageText = age > 0 ? `${toArabicNumerals(age)} سنة` : "—";
+      const daysUntilBirthday = getDaysUntilBirthday(member.dob);
+      let birthdayCountdownText = "";
+      if (daysUntilBirthday !== null) {
+        if (daysUntilBirthday === 0) {
+          birthdayCountdownText = " - عيد ميلاده النهاردة 🎉";
+        } else {
+          birthdayCountdownText = ` - باقي ${formatDaysWord(daysUntilBirthday)}`;
+        }
+      }
       const attendanceStatus = todayAttendance[member.id] || null;
 
       const presentSelected = attendanceStatus === "present" ? "selected" : "";
@@ -1718,7 +1783,7 @@ const UI = {
         <div class="member-card-header">
           <div>
             <div class="member-name">${member.name}</div>
-            <div class="member-age">🎂 ${ageText}</div>
+            <div class="member-age">🎂 ${ageText}${birthdayCountdownText}</div>
           </div>
           ${statusBadgeHtml}
         </div>
